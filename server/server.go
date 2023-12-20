@@ -8,6 +8,7 @@ import (
 	"math"
 	"net"
 	"net/textproto"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -329,6 +330,51 @@ func (s *session) getArticle(args []string) (*nntp.Article, error) {
 	return s.backend.GetArticle(s.group, args[0])
 }
 
+func sendHeaders(dw io.Writer, article *nntp.Article) {
+	order := []string{
+		"Subject", "From", "Date", "Message-Id", "References",
+	}
+
+	hasImportantKeys := make(map[string]bool)
+	for _, v := range order {
+		hasImportantKeys[v] = false
+	}
+
+	keys := make([]string, 0, len(article.Header))
+	for k := range article.Header {
+		if _, importantKey := hasImportantKeys[k]; importantKey {
+			hasImportantKeys[k] = true
+		} else {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+
+	type kv struct {
+		k string
+		v []string
+	}
+
+	newOrder := make([]kv, 0, len(article.Header))
+	for _, k := range order {
+		if hasImportantKeys[k] {
+			newOrder = append(newOrder, kv{k, article.Header[k]})
+		}
+	}
+	for _, k := range keys {
+		newOrder = append(newOrder, kv{k, article.Header[k]})
+	}
+	for _, hdr := range newOrder {
+		fmt.Fprintf(dw, "%s: %s\r\n", hdr.k, hdr.v[0])
+		// TODO: does NNTP have a problem with multiple instances of the same header? was the above v[0] intentional?
+		if len(hdr.v) > 1 {
+			for _, v := range hdr.v[1:] {
+				fmt.Fprintf(dw, "%s: %s\r\n", hdr.k, v)
+			}
+		}
+	}
+}
+
 /*
    Syntax
      HEAD message-id
@@ -359,9 +405,8 @@ func handleHead(args []string, s *session, c *textproto.Conn) error {
 	c.PrintfLine("221 1 %s", article.MessageID())
 	dw := c.DotWriter()
 	defer dw.Close()
-	for k, v := range article.Header {
-		fmt.Fprintf(dw, "%s: %s\r\n", k, v[0])
-	}
+
+	sendHeaders(dw, article)
 	return nil
 }
 
@@ -442,9 +487,7 @@ func handleArticle(args []string, s *session, c *textproto.Conn) error {
 	dw := c.DotWriter()
 	defer dw.Close()
 
-	for k, v := range article.Header {
-		fmt.Fprintf(dw, "%s: %s\r\n", k, v[0])
-	}
+	sendHeaders(dw, article)
 
 	fmt.Fprintln(dw, "")
 
