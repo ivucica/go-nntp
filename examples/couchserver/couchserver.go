@@ -71,6 +71,58 @@ type article struct {
 	Added       time.Time              `json:"added"`
 }
 
+// Supply mandatory headers if not present already.
+//
+// * RFC1036/5536 say required headers are From, Date, Newsgroups, Subject,
+//   Message-ID and Path.
+// * RFC5537 says client may omit Message-ID, Date and Path when posting.
+// * RFC5537 mentions Injection-Date, too, but not as mandatory.
+//
+// textproto.MIMEHeader.Get could have been used rather than direct map access
+// to perform case-insensitive fetches. But since this depends on
+// textproto.CanonicalMIMEHeaderKey to have been used already, and since it
+// should have been done already (since nntp.Article.Header is a
+// textproto.MIMEHeader already, and was obtained by using
+// textproto.ReadMIMEHeader), we can depend on CouchDB containing the
+// canonical-cased headers already. The confusion may arise for something like
+// Message-Id, since RFCs refer to it as Message-ID; however, its canonicalized
+// form is Message-Id.
+//
+// Some of the added headers are stubs -- some are unknowable at fetch time, and
+// should have been inserted at posting time.
+//
+// Hence we'd expect these:
+//
+// Date: 27 Feb 2002 12:50:22 +0200
+// From: some.sender@example.net
+// Message-Id: <one.two-3@example.admin.info>
+// Newsgroups: example.admin.info
+// Path: sitename.example.net
+// Subject: A Subject Line
+//
+// These are treated as defaults and will only be added if needed.
+func (ar *article) addMandatoryHeaders() {
+	defaults := make(textproto.MIMEHeader)
+
+	// RFC5536 says this should be a RFC5322 date. RFC822Z will suffice.
+	defaults.Set("Date", ar.Added.Format(time.RFC822Z))
+	defaults.Set("From", "unknown.sender")
+	defaults.Set("Message-ID", fmt.Sprintf("<%s.%s@unspecified.msgid>", ar.MsgID, strconv.FormatInt(ar.Added.UnixNano(), 36)))
+	defaults.Set("Newsgroups", "unspecified.newsgroups")
+	defaults.Set("Path", "unspecified.path") // This should be the local machine's hostname, and should be injected at insertion time.
+	defaults.Set("Subject", "Unspecified Subject")
+
+	// For every mandatory header that has no entries set, assign the slice from
+	// the defaults map. This should be safe; the map has been constructed above
+	// from scratch, so slices should be fine.
+	for k := range defaults {
+		if entries, ok := ar.Headers[k]; !ok || len(entries) == 0 {
+			log.Printf("article %s: missing header in db: %s; assigning %q", ar.MsgID, k, defaults[k])
+			ar.Headers[k] = defaults[k]
+		}
+	}
+}
+
 type articleResults struct {
 	Rows []struct {
 		Key     []interface{} `json:"key"`
@@ -160,7 +212,11 @@ func (cb *couchBackend) GetGroup(name string) (*nntp.Group, error) {
 
 func (cb *couchBackend) mkArticle(ar article) *nntp.Article {
 	url := fmt.Sprintf("%s/%s/article", cb.db.DBURL(), cleanupID(ar.MsgID, true))
+
+	ar.addMandatoryHeaders()
+
 	return &nntp.Article{
+		// TODO: some clients (slnr) show headers in the received order; should the order of headers be persisted somehow? we cannot do that with the map, but would maybe sorting the headers (ending with enforced From, To, Date, Subject or similar order) be right? should we do that in go-nntp base lib?
 		Header: textproto.MIMEHeader(ar.Headers),
 		Body:   &lazyOpener{url, nil, nil},
 		Bytes:  ar.Bytes,
