@@ -327,6 +327,19 @@ func (s *session) getArticle(args []string) (*nntp.Article, error) {
 	if s.group == nil {
 		return nil, ErrNoGroupSelected
 	}
+
+	if len(args) == 0 {
+		// Many commands allow the concept of a 'current' article and
+		// allow args to be empty. This is not supported, and args[0]
+		// was previously always accessed.
+		//
+		// Here we pretend that no article is selected because it is
+		// currently not stored anywhere. There is no support for
+		// 'current' article. We at least prevent a panic when accessing
+		// element of slice that's not present.
+		return nil, ErrNoCurrentArticle
+	}
+
 	return s.backend.GetArticle(s.group, args[0])
 }
 
