@@ -370,30 +370,16 @@ func handleListGroup(args []string, s *session, c *textproto.Conn) error {
 	}
 
 	// Parse the range.
-	// TODO: just use the existing [parseRange] function.
-	rangeComponents := strings.Split(idxRange, "-")
-	if len(rangeComponents) > 2 {
-		return ErrSyntax
+	from, to := parseRange(idxRange)
+	if from == 0 {
+	    // Error indicator. We do not reach the point where we can pass an
+	    // empty value to idxRange (and if we do, it's also invalid), so
+	    // 'from' can only be 0 if it's invalid input.
+	    return ErrSyntax
 	}
-
-	from, err := strconv.ParseInt(rangeComponents[0], 0, 64)
-	if err != nil {
-		return ErrSyntax // not a number
-	}
-	if from < 1 {
-		return ErrSyntax // zero or negative
-	}
-	to := int64(math.MaxInt64) // indicate "run to the end"
-	if len(rangeComponents) == 1 {
-		to = from
-	} else if len(rangeComponents) > 1 && rangeComponents[1] != "" {
-		to, err = strconv.ParseInt(rangeComponents[1], 0, 64)
-		if err != nil {
-			return ErrSyntax
-		}
-		if to < from {
-			return ErrSyntax
-		}
+	// Cover other invalid values.
+	if from < 1 || from > to {
+	    return ErrSyntax
 	}
 
 	// Parsing syntax complete, start actual work.
@@ -419,15 +405,12 @@ func handleListGroup(args []string, s *session, c *textproto.Conn) error {
 
 	c.PrintfLine("211 %d %d %d %s list follows",
 		group.Count, group.Low, group.High, group.Name)
-	log.Printf("211 %d %d %d %s list follows",
-		group.Count, group.Low, group.High, group.Name)
 
 	// Same as in OVER, except we only provide article's num.
 	dw := c.DotWriter()
 	defer dw.Close()
 	for _, a := range articles {
 		fmt.Fprintf(dw, "%d\n", a.Num)
-		log.Printf("* %d", a.Num)
 	}
 
 	// like GROUP, this is meant to select the first article as the current
