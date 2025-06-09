@@ -114,6 +114,7 @@ func NewServer(backend Backend) *Server {
 	rv.Handlers[""] = handleDefault
 	rv.Handlers["quit"] = handleQuit
 	rv.Handlers["group"] = handleGroup
+	rv.Handlers["listgroup"] = handleListGroup
 	rv.Handlers["list"] = handleList
 	rv.Handlers["head"] = handleHead
 	rv.Handlers["body"] = handleBody
@@ -319,6 +320,126 @@ func handleGroup(args []string, s *session, c *textproto.Conn) error {
 
 	c.PrintfLine("211 %d %d %d %s",
 		group.Count, group.Low, group.High, group.Name)
+	return nil
+}
+
+/*
+   Syntax
+     LISTGROUP group start-end
+     LISTGROUP group start-
+     LISTGROUP group start
+     LISTGROUP group
+     LISTGROUP
+
+   Responses
+     211 number low high group  Article numbers follow (multi-line)
+     411                        No such newsgroup
+     412                        No newsgroup selected
+*/
+
+func handleListGroup(args []string, s *session, c *textproto.Conn) error {
+	// LISTGROUP: required by Neomutt.
+	//
+	// Essentially a combination of GROUP and OVER:
+	// - accept optional group
+	// - if group is accepted, accept range
+	// - select the Low article as the current one (even if out of range)
+	// - instead of all fields in OVER, print out just the article num
+
+	// n.b. technically RFC3977 does not document permission to return
+	// ErrSyntax, but it's the closest we can get to if someone passes
+	// invalid range (and this is probably what should be done by
+	// parseRange if it is not happening already)
+
+	var group *nntp.Group
+	if len(args) < 1 {
+		if s.group == nil {
+			return ErrNoGroupSelected
+		}
+		// no group passed? try with the default one
+		group = s.group
+	}
+	// if no group is selected by this point, agent has passed in a group
+	// name and we will have to fetch it later
+
+	// process range in one of the formats: N, N-, N-M
+	idxRange := "1-" // default per rfc3977 section 6.1.2.2
+	if len(args) > 1 {
+		idxRange = args[1]
+	}
+
+	// Parse the range.
+	// TODO: just use the existing [parseRange] function.
+	rangeComponents := strings.Split(idxRange, "-")
+	if len(rangeComponents) > 2 {
+		return ErrSyntax
+	}
+
+	from, err := strconv.ParseInt(rangeComponents[0], 0, 64)
+	if err != nil {
+		return ErrSyntax // not a number
+	}
+	if from < 1 {
+		return ErrSyntax // zero or negative
+	}
+	to := int64(math.MaxInt64) // indicate "run to the end"
+	if len(rangeComponents) == 1 {
+		to = from
+	} else if len(rangeComponents) > 1 && rangeComponents[1] != "" {
+		to, err = strconv.ParseInt(rangeComponents[1], 0, 64)
+		if err != nil {
+			return ErrSyntax
+		}
+		if to < from {
+			return ErrSyntax
+		}
+	}
+
+	// Parsing syntax complete, start actual work.
+
+	if group == nil {
+		// no group selected at this point? user passed a group in.
+		// we need to fetch it.
+		var err error
+		group, err = s.backend.GetGroup(args[0])
+		if err != nil {
+			return err
+		}
+		// this command also selects the group, like GROUP does (it is meant
+		// to be identical to GROUP except group argument is optional, and
+		// range argument is permitted)
+		s.group = group
+	}
+
+	articles, err := s.backend.GetArticles(s.group, from, to)
+	if err != nil {
+		return err
+	}
+
+	c.PrintfLine("211 %d %d %d %s list follows",
+		group.Count, group.Low, group.High, group.Name)
+	log.Printf("211 %d %d %d %s list follows",
+		group.Count, group.Low, group.High, group.Name)
+
+	// Same as in OVER, except we only provide article's num.
+	dw := c.DotWriter()
+	defer dw.Close()
+	for _, a := range articles {
+		fmt.Fprintf(dw, "%d\n", a.Num)
+		log.Printf("* %d", a.Num)
+	}
+
+	// like GROUP, this is meant to select the first article as the current
+	// one in the group, even if that is not the current one.
+	//
+	// We should first add support for "current article". Implementation
+	// of HEAD and of getArticle suggest there is no support for that right
+	// now. 'session' has no indication it supports it. *nntp.Group does
+	// not either -- and probably should not anyway, it's a session
+	// attribute.
+	//
+	// s.currentArticle = group.Low
+
 	return nil
 }
 
